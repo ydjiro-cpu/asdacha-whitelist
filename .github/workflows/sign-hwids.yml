@@ -1,0 +1,63 @@
+name: sign-hwids
+
+# Подписывает список HWID ключом (secret HWID_MAC_KEY) и кладёт подписанную
+# копию в hwids.signed.txt. Мод читает именно её.
+#
+# Как это работает:
+#   1) Владелец редактирует обычный hwids.txt (по одному HWID в строке) и
+#      коммитит -> Action подписывает файл -> появляется hwids.signed.txt.
+#   2) Мод качает hwids.signed.txt, натив проверяет подпись ключом из DLL.
+#   3) Дописать свой HWID посторонним нельзя: подпись в Actions-secret,
+#      а коммитить в main может только владелец репозитория.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hwids.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compute MAC
+        env:
+          MAC_KEY: ${{ secrets.HWID_MAC_KEY }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          key = int(os.environ['MAC_KEY'], 16)
+          MASK = (1 << 64) - 1
+          with open('hwids.txt', 'rb') as f:
+              data = f.read().replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+          h = 0xcbf29ce484222325
+          for b in data:
+              h ^= b
+              h = (h * 0x100000001b3) & MASK
+          v = h ^ key
+          v = (v * 0xFF51AFD7ED558CCD) & MASK
+          v ^= v >> 33
+          v = (v * 0xC4CEB9FE1A85EC53) & MASK
+          v ^= v >> 29
+          mac = format(v, '016x')
+          with open('hwids.signed.txt', 'w', newline='\n') as f:
+              f.write(mac + '|' + data.decode('utf-8'))
+          print('MAC:', mac)
+          PYEOF
+
+      - name: commit signed list
+        run: |
+          git config user.name "svin-bot"
+          git config user.email "svin-bot@users.noreply.github.com"
+          git add hwids.signed.txt
+          if git diff --staged --quiet; then
+            echo "nothing to commit"
+          else
+            git commit -m "sign hwids"
+            git push
+          fi
